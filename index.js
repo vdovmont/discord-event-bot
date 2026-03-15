@@ -81,6 +81,7 @@ function createDefaultState() {
     announcementMessageId: null,
     title: 'Mirax Registration | Lap Dance',
     description: 'Wait until registration start time and then select your role from the menu below',
+    descriptionRus: 'Дождитесь начала регистрации и потом выберите свою роль в меню ниже',
     imageUrl: DEFAULT_IMAGE_URL,
     seats: Object.fromEntries(SEAT_CONFIG.map(s => [s.key, []])),
     capacities: Object.fromEntries(SEAT_CONFIG.map(s => [s.key, s.capacity])),
@@ -123,6 +124,9 @@ function loadState() {
     base.announcementMessageId = parsed.announcementMessageId || null;
     base.title = parsed.title || base.title;
     base.description = parsed.description || base.description;
+    if (typeof parsed.descriptionRus === 'string' && parsed.descriptionRus.trim()) {
+      base.descriptionRus = parsed.descriptionRus;
+    }
     if (typeof parsed.imageUrl === 'string' && parsed.imageUrl.trim()) {
       base.imageUrl = parsed.imageUrl;
     }
@@ -370,7 +374,7 @@ function buildEmbed(client, currentState = state, statusOverride = null) {
   
   const embed = new EmbedBuilder()
     .setTitle(currentState.title)
-    .setDescription(`${currentState.description}\n\n${buildEventInfoLines(currentState, statusOverride)}\n\u200B`)
+    .setDescription(`${currentState.description}\n${currentState.descriptionRus}\n\n${buildEventInfoLines(currentState, statusOverride)}\n\u200B`)
     .setColor(0xb100cd) //purple
 	.setImage(currentState.imageUrl)
 	.setFooter({
@@ -900,19 +904,16 @@ client.on('interactionCreate', async interaction => {
         nextState.title = title;
         nextState.description = description;
 
-        const announcement = await interaction.channel.send({
+        const sent = await interaction.channel.send({
           content: '@everyone',
           allowedMentions: { parse: ['everyone'] },
-        });
-
-        const sent = await interaction.channel.send({
           embeds: [buildEmbed(client, nextState)],
           components: buildComponents(nextState),
         });
 
         nextState.signupMessageId = sent.id;
         nextState.signupChannelId = sent.channel.id;
-        nextState.announcementMessageId = announcement.id;
+        nextState.announcementMessageId = null;
         state = nextState;
         saveState(state);
 
@@ -1119,12 +1120,6 @@ client.on('interactionCreate', async interaction => {
           await deleteTrackedMessage(
             client,
             state.signupChannelId,
-            state.announcementMessageId,
-            'current event announcement'
-          );
-          await deleteTrackedMessage(
-            client,
-            state.signupChannelId,
             state.signupMessageId,
             'current event message'
           );
@@ -1150,12 +1145,6 @@ client.on('interactionCreate', async interaction => {
           return;
         }
 
-        await deleteTrackedMessage(
-          client,
-          archivedEvent.signupChannelId,
-          archivedEvent.announcementMessageId,
-          'archived event announcement'
-        );
         await deleteTrackedMessage(
           client,
           archivedEvent.signupChannelId,
