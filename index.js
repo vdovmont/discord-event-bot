@@ -51,8 +51,9 @@ const SEAT_CONFIG = [
   { key: 'manager', label: '📋 Manager | Заведующий', capacity: 4 },
   { key: 'security', label: '🛡️ Security | Тестостероны', capacity: 2 },
   { key: 'mc', label: '🎤 MC | Тамада', capacity: 2 },
-  { key: 'photographer', label: '📸 Photographer | Чел с Камерой', capacity: 2 },
   { key: 'director_staff', label: '🎬 Director Staff | Смотрящие', capacity: 2 },
+  { key: 'photographer', label: '📸 Photographer | Чел с Камерой', capacity: 2 },
+  { key: 'dj', label: '💿 DJ | Чел за Пультом', capacity: 1 },
 ];
 
 // ---------- Persistence ----------
