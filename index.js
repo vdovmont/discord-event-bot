@@ -26,6 +26,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 const ARCHIVE_FILE = path.join(__dirname, 'archive.json');
+const RULE_MESSAGES_FILE = path.join(__dirname, 'rules-messages-ids.json');
 
 const {
   Client,
@@ -37,6 +38,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  AttachmentBuilder,
   EmbedBuilder,
   MessageFlags
 } = require('discord.js');
@@ -57,7 +59,11 @@ const SEAT_CONFIG = [
   { key: 'backups', label: '🛟 Backups | Помощники', capacity: null, selectable: false },
 ];
 
+const FILES_DIR = path.join(__dirname, 'files');
 const BACKUP_SEAT_KEY = 'backups';
+const RULE_IMAGE_COUNT = 10;
+const STAFF_RULE_IMAGE_COUNT = 19;
+const RULE_HEADER_IMAGE_FILE = path.join(FILES_DIR, 'rules_header.jpg');
 
 // ---------- Persistence ----------
 
@@ -192,6 +198,54 @@ function loadArchive() {
 
 function saveArchive(archive) {
   fs.writeFileSync(ARCHIVE_FILE, JSON.stringify(archive, null, 2), 'utf8');
+}
+
+function createDefaultRuleMessageState() {
+  return {
+    rules: [],
+    rulesStaff: [],
+  };
+}
+
+function loadRuleMessageState() {
+  if (!fs.existsSync(RULE_MESSAGES_FILE)) {
+    return createDefaultRuleMessageState();
+  }
+
+  try {
+    const raw = fs.readFileSync(RULE_MESSAGES_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const base = createDefaultRuleMessageState();
+
+    if (Array.isArray(parsed.rules)) {
+      base.rules = parsed.rules;
+    }
+
+    if (Array.isArray(parsed.rulesStaff)) {
+      base.rulesStaff = parsed.rulesStaff;
+    }
+
+    return base;
+  } catch (err) {
+    console.error('Failed to load rules-messages-ids.json, using empty state.', err);
+    return createDefaultRuleMessageState();
+  }
+}
+
+function saveRuleMessageState(ruleMessageState) {
+  fs.writeFileSync(RULE_MESSAGES_FILE, JSON.stringify(ruleMessageState, null, 2), 'utf8');
+}
+
+function saveRuleMessageBatch(type, messages) {
+  const ruleMessageState = loadRuleMessageState();
+  ruleMessageState[type].push({
+    createdAt: new Date().toISOString(),
+    messages: messages.map(message => ({
+      channelId: message.channel.id,
+      messageId: message.id,
+    })),
+  });
+  saveRuleMessageState(ruleMessageState);
 }
 
 function popLatestArchive() {
@@ -378,7 +432,7 @@ function leaveSeats(userId) {
 
   removeUserFromAllSeats(userId);
   saveState(state);
-  return { ok: true, changed: true, message: 'You left the RSVP.' };
+  return { ok: true, changed: true, message: 'You left the Event.' };
 }
 
 function seatFieldText(seatKey, currentState = state) {
@@ -400,11 +454,13 @@ function buildEmbed(client, currentState = state, statusOverride = null) {
     .setTitle(currentState.title)
     .setDescription(`${currentState.description}\n${currentState.descriptionRus}\n\n${buildEventInfoLines(currentState, statusOverride)}\n\u200B`)
     .setColor(0xb100cd) //purple
-	.setImage(currentState.imageUrl)
 	.setFooter({
 		text: `${groupName}  •  ${formatDateTime(currentState.eventTime)}`,
 		iconURL: groupIcon,
 	});
+  if (typeof currentState.imageUrl === 'string' && currentState.imageUrl.trim()) {
+    embed.setImage(currentState.imageUrl);
+  }
 
   for (const seat of SEAT_CONFIG.filter(seat => seat.key !== BACKUP_SEAT_KEY)) {
     const users = currentState.seats[seat.key] || [];
@@ -711,11 +767,218 @@ function isUnlimitedSeat(seatKey) {
   return getSeatCapacity(seatKey) === null;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getNumberedFiles(prefix) {
+  if (!fs.existsSync(FILES_DIR)) {
+    return [];
+  }
+
+  const filePattern = new RegExp(`^${escapeRegExp(prefix)}_(\\d+)\\.jpg$`, 'i');
+
+  return fs.readdirSync(FILES_DIR)
+    .map(fileName => {
+      const match = fileName.match(filePattern);
+      return match
+        ? {
+            filePath: path.join(FILES_DIR, fileName),
+            number: Number(match[1]),
+          }
+        : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.number - b.number)
+    .map(file => file.filePath);
+}
+
+function getMissingNumberedFiles(prefix, filePaths, expectedCount) {
+  const filePattern = new RegExp(`^${escapeRegExp(prefix)}_(\\d+)\\.jpg$`, 'i');
+  const foundNumbers = new Set(
+    filePaths
+      .map(filePath => path.basename(filePath).match(filePattern))
+      .filter(Boolean)
+      .map(match => Number(match[1]))
+  );
+
+  return Array.from({ length: expectedCount }, (_, index) => index + 1)
+    .filter(number => !foundNumbers.has(number))
+    .map(number => `${prefix}_${String(number).padStart(2, '0')}.jpg`);
+}
+
+function buildAttachments(filePaths) {
+  return filePaths.map(filePath =>
+    new AttachmentBuilder(filePath, { name: path.basename(filePath) })
+  );
+}
+
+function buildHelpEmbeds() {
+  const englishHelp = [
+    'All slash commands listed here are restricted to special roles.',
+    '',
+    '**/help** - Show this help message.',
+    '**/rules** - Post public rules.',
+    '**/rules-staff** - Post staff rules.',
+    '**/delete-rules** - Delete the latest messages posted by /rules.',
+    '**/delete-rules-staff** - Delete the latest messages posted by /rules-staff.',
+    '**/new-event** - Post a new Event registration message.',
+    '**/delete-event** - Delete the current or selected archived Event.',
+    '**/event-list** - Show current and archived Event dates.',
+    '**/clear-seating** - Clear all Event seat lists.',
+    '**/remove-user** - Remove a user from one seat or from all seats.',
+    '**/set-seat-capacity** - Change one seat capacity or make it unlimited.',
+    '**/reset-capacities** - Restore all default seat capacities.',
+    '**/set-event-time** - Set Event start time.',
+    '**/set-duration** - Set Event duration in minutes.',
+    '**/set-registration-close** - Set registration closing time.',
+    '**/set-registration-start** - Set registration start time.',
+    '**/set-image** - Set the Event image by URL.',
+  ].join('\n');
+
+  const russianHelp = [
+    'Все slash-команды из этого списка доступны только специальным ролям.',
+    '',
+    '**/help** - Показать это сообщение помощи.',
+    '**/rules** - Опубликовать общие правила.',
+    '**/rules-staff** - Опубликовать правила для стаффа.',
+    '**/delete-rules** - Удалить последие сообщения команды /rules.',
+    '**/delete-rules-staff** - Удалить последние сообщения команды /rules-staff.',
+    '**/new-event** - Опубликовать новое Ивент-сообщение для регистрации.',
+    '**/delete-event** - Удалить текущий или выбранный архивный Ивент.',
+    '**/event-list** - Показать даты текущего и архивных Ивентов.',
+    '**/clear-seating** - Очистить все списки мест Ивента.',
+    '**/remove-user** - Убрать пользователя из одного места или из всех мест.',
+    '**/set-seat-capacity** - Изменить лимит одного места или сделать его безлимитным.',
+    '**/reset-capacities** - Вернуть стандартные лимиты всех мест.',
+    '**/set-event-time** - Установить время начала Ивента.',
+    '**/set-duration** - Установить длительность Ивента в минутах.',
+    '**/set-registration-close** - Установить время закрытия регистрации.',
+    '**/set-registration-start** - Установить время начала регистрации.',
+    '**/set-image** - Установить картинку Ивента по URL.',
+  ].join('\n');
+
+  return [
+    new EmbedBuilder()
+      .setTitle('Commands')
+      .setDescription(englishHelp)
+      .setColor(0xb100cd),
+    new EmbedBuilder()
+      .setTitle('Команды')
+      .setDescription(russianHelp)
+      .setColor(0xb100cd),
+  ];
+}
+
+function isAlreadyDeletedDiscordError(err) {
+  return err?.code === 10008 || err?.code === 10003;
+}
+
+async function deleteLatestRuleMessageBatch(client, type) {
+  const ruleMessageState = loadRuleMessageState();
+  const batches = ruleMessageState[type];
+  const batch = batches.pop() || null;
+
+  if (!batch) {
+    saveRuleMessageState(ruleMessageState);
+    return {
+      ok: true,
+      deletedCount: 0,
+      alreadyDeletedCount: 0,
+      failedCount: 0,
+      message: 'No saved image message IDs found.',
+    };
+  }
+
+  let deletedCount = 0;
+  let alreadyDeletedCount = 0;
+  const failedMessages = [];
+
+  for (const savedMessage of batch.messages || []) {
+    try {
+      const channel = await client.channels.fetch(savedMessage.channelId);
+      if (!channel || !channel.isTextBased()) {
+        alreadyDeletedCount++;
+        continue;
+      }
+
+      const message = await channel.messages.fetch(savedMessage.messageId);
+      await message.delete();
+      deletedCount++;
+    } catch (err) {
+      if (isAlreadyDeletedDiscordError(err)) {
+        alreadyDeletedCount++;
+        continue;
+      }
+
+      failedMessages.push(savedMessage);
+      console.error('Failed to delete rules image message:', err.message);
+    }
+  }
+
+  if (failedMessages.length > 0) {
+    batches.push({
+      ...batch,
+      messages: failedMessages,
+    });
+  }
+
+  saveRuleMessageState(ruleMessageState);
+
+  if (failedMessages.length > 0) {
+    return {
+      ok: false,
+      deletedCount,
+      alreadyDeletedCount,
+      failedCount: failedMessages.length,
+      message: `Deleted ${deletedCount} image message(s), cleared ${alreadyDeletedCount} stale ID(s), but failed to delete ${failedMessages.length} message(s). Check bot permissions and try again.`,
+    };
+  }
+
+  if (deletedCount === 0 && alreadyDeletedCount > 0) {
+    return {
+      ok: true,
+      deletedCount,
+      alreadyDeletedCount,
+      failedCount: 0,
+      message: `Images were already deleted. Cleared ${alreadyDeletedCount} stale message ID(s) from rules-messages-ids.json.`,
+    };
+  }
+
+  return {
+    ok: true,
+    deletedCount,
+    alreadyDeletedCount,
+    failedCount: 0,
+    message: `Deleted ${deletedCount} image message(s).${alreadyDeletedCount > 0 ? ` Also cleared ${alreadyDeletedCount} stale ID(s).` : ''}`,
+  };
+}
+
 // ---------- Slash command registration ----------
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('newevent')
+    .setName('help')
+    .setDescription('Show bot command help'),
+
+  new SlashCommandBuilder()
+    .setName('rules')
+    .setDescription('Post the rules images'),
+
+  new SlashCommandBuilder()
+    .setName('rules-staff')
+    .setDescription('Post the staff rules images'),
+
+  new SlashCommandBuilder()
+    .setName('delete-rules')
+    .setDescription('Delete the latest rules image batch posted by the bot'),
+
+  new SlashCommandBuilder()
+    .setName('delete-rules-staff')
+    .setDescription('Delete the latest staff rules image batch posted by the bot'),
+
+  new SlashCommandBuilder()
+    .setName('new-event')
     .setDescription('Post new registration message')
     .addStringOption(opt =>
       opt
@@ -731,7 +994,7 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName('deleteevent')
+    .setName('delete-event')
     .setDescription('Delete latest posted event and restore previous one')
     .addBooleanOption(opt =>
       opt
@@ -747,12 +1010,12 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName('eventlist')
+    .setName('event-list')
     .setDescription('Show current and archived event times'),
 
   new SlashCommandBuilder()
-    .setName('clearseating')
-    .setDescription('Clear all RSVP seats')
+    .setName('clear-seating')
+    .setDescription('Clear all Event seats')
     .addBooleanOption(opt =>
       opt
         .setName('confirm')
@@ -761,7 +1024,7 @@ const commands = [
     ),
 	
 	new SlashCommandBuilder()
-	.setName('removeuser')
+	.setName('remove-user')
 	.setDescription('Remove a user from one seat or from all seats')
 	.addUserOption(opt =>
 	opt
@@ -783,7 +1046,7 @@ const commands = [
 	),
 
 	new SlashCommandBuilder()
-	  .setName('setseatcapacity')
+	  .setName('set-seat-capacity')
 	  .setDescription('Change how many users a seat can have')
 	  .addStringOption(opt =>
 		opt
@@ -812,7 +1075,7 @@ const commands = [
 	  ),
 	
   new SlashCommandBuilder()
-  .setName('resetcapacities')
+  .setName('reset-capacities')
   .setDescription('Reset all seat capacities to default values')
   .addBooleanOption(opt =>
     opt
@@ -822,7 +1085,7 @@ const commands = [
   ),
   
   new SlashCommandBuilder()
-  .setName('seteventtime')
+  .setName('set-event-time')
   .setDescription('Set the event start time')
   .addStringOption(opt =>
     opt
@@ -832,7 +1095,7 @@ const commands = [
   ),
   
   new SlashCommandBuilder()
-  .setName('setduration')
+  .setName('set-duration')
   .setDescription('Set event duration in minutes')
   .addIntegerOption(opt =>
     opt
@@ -843,7 +1106,7 @@ const commands = [
   ),
   
   new SlashCommandBuilder()
-  .setName('setregistrationclose')
+  .setName('set-registration-close')
   .setDescription('Set registration closing time')
   .addStringOption(opt =>
     opt
@@ -853,7 +1116,7 @@ const commands = [
   ),
 
   new SlashCommandBuilder()
-  .setName('setregistrationstart')
+  .setName('set-registration-start')
   .setDescription('Set registration start time')
   .addStringOption(opt =>
     opt
@@ -863,7 +1126,7 @@ const commands = [
   ),
 
   new SlashCommandBuilder()
-  .setName('setimage')
+  .setName('set-image')
   .setDescription('Set event image by URL')
   .addStringOption(opt =>
     opt
@@ -911,7 +1174,7 @@ client.on('guildMemberAdd', async member => {
 
 client.on('interactionCreate', async interaction => {
   try {
-    if (interaction.isChatInputCommand()) {
+      if (interaction.isChatInputCommand()) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const hasRole =
@@ -925,7 +1188,96 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
-      if (interaction.commandName === 'newevent') {
+      if (interaction.commandName === 'help') {
+        await interaction.editReply({
+          embeds: buildHelpEmbeds(),
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'rules') {
+        const ruleImageFiles = getNumberedFiles('rules');
+        const missingRuleImages = getMissingNumberedFiles(
+          'rules',
+          ruleImageFiles,
+          RULE_IMAGE_COUNT
+        );
+
+        if (!fs.existsSync(RULE_HEADER_IMAGE_FILE)) {
+          missingRuleImages.unshift(path.basename(RULE_HEADER_IMAGE_FILE));
+        }
+
+        if (missingRuleImages.length > 0) {
+          await interaction.editReply(
+            `Missing rules image file(s): ${missingRuleImages.join(', ')}`
+          );
+          return;
+        }
+
+        const sentMessages = [];
+        for (const attachment of buildAttachments([RULE_HEADER_IMAGE_FILE, ...ruleImageFiles])) {
+          const sentMessage = await interaction.channel.send({
+            files: [attachment],
+          });
+          sentMessages.push(sentMessage);
+        }
+        saveRuleMessageBatch('rules', sentMessages);
+
+        await interaction.editReply('Rules posted.');
+        setTimeout(() => {
+          interaction.deleteReply().catch(() => {});
+        }, 3000);
+        return;
+      }
+
+      if (interaction.commandName === 'rules-staff') {
+        const staffRuleImageFiles = getNumberedFiles('rules_staff');
+        const missingRuleImages = getMissingNumberedFiles(
+          'rules_staff',
+          staffRuleImageFiles,
+          STAFF_RULE_IMAGE_COUNT
+        );
+
+        if (!fs.existsSync(RULE_HEADER_IMAGE_FILE)) {
+          missingRuleImages.unshift(path.basename(RULE_HEADER_IMAGE_FILE));
+        }
+
+        if (missingRuleImages.length > 0) {
+          await interaction.editReply(
+            `Missing staff rules image file(s): ${missingRuleImages.join(', ')}`
+          );
+          return;
+        }
+
+        const sentMessages = [];
+        for (const attachment of buildAttachments([RULE_HEADER_IMAGE_FILE, ...staffRuleImageFiles])) {
+          const sentMessage = await interaction.channel.send({
+            files: [attachment],
+          });
+          sentMessages.push(sentMessage);
+        }
+        saveRuleMessageBatch('rulesStaff', sentMessages);
+
+        await interaction.editReply('Staff rules posted.');
+        setTimeout(() => {
+          interaction.deleteReply().catch(() => {});
+        }, 3000);
+        return;
+      }
+
+      if (interaction.commandName === 'delete-rules') {
+        const result = await deleteLatestRuleMessageBatch(client, 'rules');
+        await interaction.editReply(result.message);
+        return;
+      }
+
+      if (interaction.commandName === 'delete-rules-staff') {
+        const result = await deleteLatestRuleMessageBatch(client, 'rulesStaff');
+        await interaction.editReply(result.message);
+        return;
+      }
+
+      if (interaction.commandName === 'new-event') {
         if (state.signupMessageId && state.signupChannelId) {
           await archiveAndCloseCurrentEvent(client);
         }
@@ -951,14 +1303,14 @@ client.on('interactionCreate', async interaction => {
         state = nextState;
         saveState(state);
 
-        await interaction.editReply('RSVP message posted.');
+        await interaction.editReply('Event message posted.');
         setTimeout(() => {
           interaction.deleteReply().catch(() => {});
         }, 3000);
         return;
       }
 
-      if (interaction.commandName === 'eventlist') {
+      if (interaction.commandName === 'event-list') {
         const events = listAllEvents();
 
         if (events.length === 0) {
@@ -975,7 +1327,7 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 	  
-	  if (interaction.commandName === 'seteventtime') {
+	  if (interaction.commandName === 'set-event-time') {
 		  const input = interaction.options.getString('datetime');
 		  const date = parseDateTimeInput(input);
 
@@ -1002,7 +1354,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 		
-		if (interaction.commandName === 'setduration') {
+		if (interaction.commandName === 'set-duration') {
 		  const minutes = interaction.options.getInteger('minutes');
 		  state.durationMinutes = minutes;
 
@@ -1013,7 +1365,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 		
-		if (interaction.commandName === 'setregistrationclose') {
+		if (interaction.commandName === 'set-registration-close') {
 		  const input = interaction.options.getString('datetime');
 		  const date = parseDateTimeInput(input);
 
@@ -1033,7 +1385,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 
-		if (interaction.commandName === 'setregistrationstart') {
+		if (interaction.commandName === 'set-registration-start') {
 		  const input = interaction.options.getString('datetime');
 		  const date = parseDateTimeInput(input);
 
@@ -1053,7 +1405,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 
-		if (interaction.commandName === 'setimage') {
+		if (interaction.commandName === 'set-image') {
 		  const imageUrl = interaction.options.getString('url');
 
 		  if (!isValidHttpUrl(imageUrl)) {
@@ -1069,7 +1421,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 
-		if (interaction.commandName === 'setseatcapacity') {
+		if (interaction.commandName === 'set-seat-capacity') {
 		  const seatKey = interaction.options.getString('seat');
 		  const newCapacity = interaction.options.getInteger('number');
 		  const unlimited = interaction.options.getBoolean('unlimited') ?? false;
@@ -1107,7 +1459,7 @@ client.on('interactionCreate', async interaction => {
 		  return;
 		}
 
-      if (interaction.commandName === 'deleteevent') {
+      if (interaction.commandName === 'delete-event') {
         const confirm = interaction.options.getBoolean('confirm');
         const datetime = interaction.options.getString('datetime');
 
@@ -1192,7 +1544,7 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
-      if (interaction.commandName === 'resetcapacities') {
+      if (interaction.commandName === 'reset-capacities') {
         const confirm = interaction.options.getBoolean('confirm');
 
         if (!confirm) {
@@ -1215,7 +1567,7 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
-      if (interaction.commandName === 'clearseating') {
+      if (interaction.commandName === 'clear-seating') {
         const confirm = interaction.options.getBoolean('confirm');
 
         if (!confirm) {
@@ -1233,7 +1585,7 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 	  
-	if (interaction.commandName === 'removeuser') {
+	if (interaction.commandName === 'remove-user') {
 	  const user = interaction.options.getUser('user');
 	  const seatKey = interaction.options.getString('seat');
 
