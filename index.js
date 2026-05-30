@@ -54,7 +54,10 @@ const SEAT_CONFIG = [
   { key: 'director_staff', label: '🎬 Director Staff | Смотрящие', capacity: 2 },
   { key: 'photographer', label: '📸 Photographer | Чел с Камерой', capacity: 2 },
   { key: 'dj', label: '💿 DJ | Чел за Пультом', capacity: 1 },
+  { key: 'backups', label: '🛟 Backups | Помощники', capacity: null, selectable: false },
 ];
+
+const BACKUP_SEAT_KEY = 'backups';
 
 // ---------- Persistence ----------
 
@@ -339,7 +342,27 @@ function addUserToSeat(userId, seatKey) {
 
 	const capacity = getSeatCapacity(seatKey);
 	if (capacity !== null && state.seats[seatKey].length >= capacity) {
-	  return { ok: false, error: `That seat is full (${capacity}/${capacity}).` };
+	  const backupSeat = getSeatConfig(BACKUP_SEAT_KEY);
+	  if (!backupSeat) {
+		return { ok: false, error: `That seat is full (${capacity}/${capacity}).` };
+	  }
+
+	  if (state.seats[BACKUP_SEAT_KEY].includes(userId)) {
+		return {
+		  ok: true,
+		  changed: false,
+		  message: `That seat is full (${capacity}/${capacity}). You are already in ${backupSeat.label}.`,
+		};
+	  }
+
+	  state.seats[BACKUP_SEAT_KEY].push(userId);
+	  saveState(state);
+
+	  return {
+		ok: true,
+		changed: true,
+		message: `That seat is full (${capacity}/${capacity}). Added you to ${backupSeat.label}.`,
+	  };
 	}
 
 	state.seats[seatKey].push(userId);
@@ -362,10 +385,10 @@ function seatFieldText(seatKey, currentState = state) {
   const users = currentState.seats[seatKey] || [];
 
   if (users.length === 0) {
-    return '—\n\u200B';
+    return '—';
   }
 
-  return users.map(id => `<@${id}>`).join('\n') + '\n\u200B';
+  return users.map(id => `<@${id}>`).join('\n');
 }
 
 function buildEmbed(client, currentState = state, statusOverride = null) {
@@ -383,7 +406,7 @@ function buildEmbed(client, currentState = state, statusOverride = null) {
 		iconURL: groupIcon,
 	});
 
-  for (const seat of SEAT_CONFIG) {
+  for (const seat of SEAT_CONFIG.filter(seat => seat.key !== BACKUP_SEAT_KEY)) {
     const users = currentState.seats[seat.key] || [];
 	const capacity = getSeatCapacity(seat.key, currentState);
     embed.addFields({
@@ -392,6 +415,21 @@ function buildEmbed(client, currentState = state, statusOverride = null) {
       inline: true,
     });
   }
+
+  embed.addFields({
+    name: '\u200B',
+    value: '──────────────────────────────────────────────────',
+    inline: false,
+  });
+
+  const backupUsers = currentState.seats[BACKUP_SEAT_KEY] || [];
+  const backupCapacity = getSeatCapacity(BACKUP_SEAT_KEY, currentState);
+  const backupSeat = getSeatConfig(BACKUP_SEAT_KEY);
+  embed.addFields({
+    name: `${backupSeat.label} (${backupUsers.length}/${backupCapacity === null ? '∞' : backupCapacity})`,
+    value: seatFieldText(BACKUP_SEAT_KEY, currentState),
+    inline: false,
+  });
 
   return embed;
 }
@@ -406,12 +444,7 @@ function buildComponents(currentState = state) {
     .setCustomId('rsvp_select')
     .setPlaceholder('Choose your seat')
 	.addOptions(
-	  SEAT_CONFIG.filter(seat => {
-		const capacity = getSeatCapacity(seat.key, currentState);
-		if (capacity === null) return true;
-		const count = (currentState.seats[seat.key] || []).length;
-		return count < capacity;
-	  }).map(seat => {
+	  SEAT_CONFIG.filter(seat => seat.selectable !== false).map(seat => {
 		const capacity = getSeatCapacity(seat.key, currentState);
 		const { labelText, emoji } = splitSeatLabel(seat.label);
 
